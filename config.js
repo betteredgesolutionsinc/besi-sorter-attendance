@@ -1,4 +1,5 @@
-window.BESI_SUPABASE_CONFIG = {
-  url: 'https://zckfptuboezyrihjhluj.supabase.co/auth/v1/.well-known/jwks.json',
-  publishableKey: 'sb_secret_gi4W4s1Isl4eRiiQ7e4ohA_ckYEdUjs'
-};
+curl -L -X POST 'https://zckfptuboezyrihjhluj.supabase.co/functions/v1/set-sorter-pin' \
+  -H 'Authorization: Bearer sb_publishable_r3YgtS93gTC57fYeuuj9wA_LQzcvDTy' \
+  -H 'apikey: sb_publishable_r3YgtS93gTC57fYeuuj9wA_LQzcvDTy' \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"Functions"}'
