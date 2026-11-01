@@ -702,12 +702,25 @@ async function loadRegistrations(){
     row.append(who,ocw,acts);list.append(row)})}
 
 $('newPasswordForm').addEventListener('submit',async e=>{e.preventDefault();let p=$('newPassword').value;if(p.length<10||p!==$('confirmPassword').value)return message('passwordMsg','Passwords must match and be at least 10 characters.',true);const {error}=await sb.auth.updateUser({password:p});if(error)return message('passwordMsg',error.message,true);if(currentProfile?.role==='employee'&&currentProfile.must_change_password){const {error:finishError}=await sb.functions.invoke('complete-sorter-password-change',{body:{}});if(finishError)return message('passwordMsg',await edgeFunctionError(finishError)+' Your new password was saved; retry this step or contact management.',true)}else if(currentProfile?.must_change_password){const {error:finishError}=await sb.rpc('complete_my_password_change');if(finishError)return message('passwordMsg',finishError.message+' Your new password was saved; retry this step or contact an administrator.',true)}history.replaceState(null,'',location.pathname);$('newPassword').value='';$('confirmPassword').value='';message('passwordMsg','Password saved. Opening attendance…');let {data:{session}}=await sb.auth.getSession();currentProfile=null;await showForSession(session)});
+function scheduledShiftDate(now,shiftText){
+ const manila=new Date(now.getTime()+8*60*60*1000),parts=manila.toISOString().slice(0,10);
+ const shift=String(shiftText||'').trim();
+ if(shift.startsWith('12:00 AM')||shift.startsWith('1:00 AM'))return addDaysIso(parts,-1);
+ return parts;
+}
 async function punch(action){
  const btn=$(action==='IN'?'timeIn':'timeOut');if(btn.disabled)return;
  const selectedShift=$('employeeShift').value,savedShift=currentEmployee?.shift_assignment||'';
  if(!currentEmployee||!selectedShift||selectedShift!==savedShift)return message('shiftMsg','Choose and save your shift before recording attendance.',true);
  const punchRec=action==='OUT'?openRecord:null;
  if(action==='OUT'&&!punchRec)return message('attendanceMsg','No active shift is selected for Time Out.',true);
+ if(action==='IN'){
+   const scheduledDate=scheduledShiftDate(new Date(),savedShift);
+   const {data:already,error:checkError}=await sb.from('attendance_records').select('id,time_in')
+     .eq('employee_id',currentEmployee.id).eq('scheduled_shift_date',scheduledDate).limit(1).maybeSingle();
+   if(checkError)return message('attendanceMsg','Could not verify this shift date. Please try again. '+checkError.message,true);
+   if(already)return message('attendanceMsg','Time In is already recorded for your scheduled shift date ('+scheduledDate+'). A second Time In is not allowed.',true);
+ }
  const actionName=action==='IN'?'Time In':'Time Out';
  if(!window.confirm(`Confirm ${actionName} for your saved shift, ${savedShift}?`))return;
  if(!navigator.onLine)return message('attendanceMsg','No connection. Nothing was recorded. Move to where you have signal, then try again.',true);
@@ -747,14 +760,18 @@ async function refreshPunchControls(){
  openRecord=data||null;
  const hasOpen=!!data,savedShift=currentEmployee.shift_assignment||'',selectedShift=shiftSelect.value||'';
  const shiftIsSaved=!!savedShift&&selectedShift===savedShift;
- // Latest open record is the active shift; older open records are never closed or modified.
+ const scheduledDate=shiftIsSaved?scheduledShiftDate(new Date(),savedShift):null;
+ let alreadyClocked=false;
+ if(scheduledDate){const q=await sb.from('attendance_records').select('id').eq('employee_id',currentEmployee.id).eq('scheduled_shift_date',scheduledDate).limit(1).maybeSingle();if(q.error){shiftSelect.disabled=false;saveShiftBtn.disabled=false;return {hasOpen,error:q.error}}alreadyClocked=!!q.data}
+ // One Time In per scheduled shift date. An older open record does not block a different shift date.
  shiftSelect.disabled=hasOpen;saveShiftBtn.disabled=hasOpen;
- inBtn.disabled=!shiftIsSaved;
+ inBtn.disabled=!shiftIsSaved||alreadyClocked;
+ if(alreadyClocked)message('attendanceMsg','Time In is already recorded for your scheduled shift date ('+scheduledDate+').');
  outBtn.disabled=!hasOpen||!shiftIsSaved;
  if(!shiftIsSaved)message('shiftMsg',selectedShift?'Save your selected shift before recording attendance.':'Choose and save your shift before recording attendance.');
- return {hasOpen,error:null}
+ return {hasOpen,alreadyClocked,error:null}
 }
-async function loadMine(){if(!currentEmployee)return;let {start,end}=selectedRange('employeeCutoff');const {data,error}=await sb.from('attendance_dtr').select('*').eq('employee_id',currentEmployee.id).gte('work_date',start).lte('work_date',end).order('work_date',{ascending:false});if(error){$('timeIn').disabled=true;$('timeOut').disabled=true;return message('attendanceMsg',error.message,true)}adjRows(data,()=>currentEmployee.shift_assignment);dtrNoteMap={};try{const nt=await sb.from('dtr_notes').select('work_date,kind,note,undertime_minutes').eq('employee_id',String(currentEmployee.id)).gte('work_date',start).lte('work_date',end);if(!nt.error)dtrNoteMap=buildNoteMap(nt.data||[])}catch(e){}renderEmployeeCutoffCalendar(data||[],start,end);const state=await refreshPunchControls();if(state.error){$('timeIn').disabled=true;$('timeOut').disabled=true;return message('attendanceMsg','Could not check your Time In status: '+state.error.message,true)}message('attendanceMsg','');paintStatus();}
+async function loadMine(){if(!currentEmployee)return;let {start,end}=selectedRange('employeeCutoff');const {data,error}=await sb.from('attendance_dtr').select('*').eq('employee_id',currentEmployee.id).gte('work_date',start).lte('work_date',end).order('work_date',{ascending:false});if(error){$('timeIn').disabled=true;$('timeOut').disabled=true;return message('attendanceMsg',error.message,true)}adjRows(data,()=>currentEmployee.shift_assignment);dtrNoteMap={};try{const nt=await sb.from('dtr_notes').select('attendance_id,work_date,kind,note,undertime_minutes').eq('employee_id',String(currentEmployee.id)).gte('work_date',start).lte('work_date',end);if(!nt.error)dtrNoteMap=buildNoteMap(nt.data||[])}catch(e){}renderEmployeeCutoffCalendar(data||[],start,end);const state=await refreshPunchControls();if(state.error){$('timeIn').disabled=true;$('timeOut').disabled=true;return message('attendanceMsg','Could not check your Time In status: '+state.error.message,true)}message('attendanceMsg','');paintStatus();}
 /* ===== v32: LDC assignment (matched by name to the roster) ===== */
 const LDC_LISTS={"1": ["JON FEDRICK MAGILLO", "JONATHAN PATROCINIO", "HERMAN ELISTERIO", "JOSHUA BEJERANO", "ANGEL SOLASCO", "GAELA MIKE LENARD", "NAVAL VIRGINIA", "PEPITO FERRER", "DOMAPTAR, AMINODEN MANINAO", "PATRICIA CANETE", "LENYILENE ARNÓPIA", "ALCOVER MA LOURDES", "ARUTA ROWENA", "RHEA MAY ALCOVER", "RUDGIE GALINDEZ", "SAN JUAN JOHN MICHAEL", "STEVEN ALVAREZ", "JOVEN TAGSIP", "AJ SANDOVAL", "MARICEL ADAN", "AUREA REONDA", "JOHN KRISTOPHER DE GRACIA", "FRANZ GERALD VELACRUZ", "ANGEL JOYCE ESPI", "JOHN CHRISTOPHER RODRIGUEZ", "DAISERIE HILAGA", "MICCA GANTE", "JOHN ARVEE CANINO", "FREDERICK VELACRUZ", "JESSABEL MADJOS", "OMMEL BACAY", "IRON FENISO", "RALPH VHENEDICT MONERAY", "CHRISTIAN GONZAGA", "ABDULLAH SALBO ENAMBO", "EMRSON GARCIA", "GERALD REBANAL", "BIENVENIDO ABARQUEZ", "CJOHN DEO CABANTANA", "NIEL JAY CABANTOC", "JERRY DANA", "AVIONA BEATO", "JDY BORDUES", "KRISTINE DIZON", "JASLYN ERRABO", "JOHN ROLL CONDE", "JR OBIAS", "KYLE DECULEN", "NANSON, ROBERT APOSTOL", "LESTER PALARAN", "FEDERICO MARTIN", "KYLE JEREMY NABOR", "JOEL RESURRECION", "APOLONIO BOLANOS", "ASHLEY JONAR FERNANDEZ", "CARLO JAY HEIRCIA", "IIANNE KEITH FERNANDEZ", "RONALD LAURENCIO", "JAY LAURENCE GREGANDA", "REGINE LAGUTAN", "ALEXA REYES", "BARQUIN , JOHN KENNETH", "BARRIENTOS REYMUND", "BENAVENTE, MARK JOSEPH", "CABAGAY, JOSHUA PHILIP CORTEZA", "CAJAN JOHN CARLO", "CANTALEJO JOHN DENVER", "CORPORAL, REAN CARLO MAGBANTAY", "CORTEZA, CHRISTIAN BYRON MIRANDA", "DE ALCA, HEIRLOOM PALOYO", "DELOS REYES PATRICK JOSHUA", "ESCOSURA MARK JAMES", "FORTU JAMESON", "FREO LUZVIMINDA", "MIEL, ERICKA BARREDO", "ORGANO CEEJAY", "ORTIZ, ARJAY", "PATAPAT RONNEL", "SAMSON MARK PHILIP", "SIBONGGA, APRIL JOY MOREÑO", "SUANGCO CHADELYN", "VALENZUELA, JANWELL CORTEZA", "VILLA BRYCE JAMES", "ZABLAN, FRANCIS MENDOZA", "ZAIDE, RED ANTHONY HERNANDEZ", "REYES CARLO", "MAISOG JENNIFER", "MANUEL JAN CHRISTIAN", "ORACION MHELVINCENT", "GARDE CHERRIE JOY", "CAPERO JOHN MARK", "AMALIN MARK ANGELO", "ESPINA FRED JOHN", "JELIZA LARANJO", "ERZANDO LEAH APRIL", "BAAY CRISTINA", "MENDEZ JOSHUA", "ORTIZ JAYVEE", "EQUIPAJE REX WATANABE", "CORDERO RENATO JR", "CINCO IZE", "VEGA MARY JOY", "ABDULLAH ENAMBO", "DAYONGDONG JAHAIR", "DAYONGDONG JOMAR", "BAGUAN JOLAC", "FAJARDO RONNEL", "BALGOS TYRON", "CEBU JOHN MARK", "SECILLANO ROCHELLE", "MORTIL ANALYN", "ARCIAGA JHOAN", "FLORES JUZZTIN", "DIASANTA SHAMAY", "FERRER, PHILIP MADRIAGA", "DOGELIO, SHAN MICHEAL DELA CRUZ", "NANTEZA MARYJOY", "MINGO PATRICK", "DOGELIO LORENCE", "PONGASI ZAYDE"], "2": ["ADAO MIRA ANGELA", "ALONZO, AJ KHILA", "ARCILLA JEREMIAH", "ARDENIO, JM", "ARNAFE NARVASA", "BACURIN, NELSON ABOGADO", "BARRIENTOS FLORITA", "BASUAN, MARYLYN", "BENONG JOMELYN", "BUNAG CHRISTOPHER", "CABRERA JOEY", "CADIZ, CASSANDRA FAYE BORJA", "CALCITAS, LANCE BELARMINO", "DAISY LABORTE", "DE JESUS ROMMEL", "DE SAN JOSE, RAMCILLE AMICAN", "EMERSON PEÑALOSA", "ENDRINA, JOBERT DULA", "ENOT, MIKE JAY", "GAYON ELAINE", "LACASTE ROY", "LERIOS, DEXTER JAY AGUIRRE", "LOPEZ, LARIAN ERICA", "MAGANA ROSALIE", "MAKABENTA CHRISTIAN", "MARICEL RODELAS", "OLLAGUE, ELLAIZA", "ORTIZ, VIVIAN", "PARACUELLES, SUSANA CASTELLONA", "POCOL, HASSAN GANDAMASIR", "POLVOROZA, JUSTINE FAYE LOPEZ", "PUNONGBAYAN JAIRUS", "SANTIAGO PAUL JESTER", "SARAH JANE REANDO", "SHIELA MALTO", "UBALDO DIVINE", "VALLA MARK ANDRO", "VIBAS, MARICRIS BANDEJES", "VERGARA EDUARDO JR", "DUCUT JOHN DAVID", "BURNIDOR ED LUIGI", "BALCUEVA EDILITO", "PANAGSAGAN JARED", "LACHENAL PRINCE JANDER", "VIDAD JUSTIN", "CASTRO JESSA", "MALAKAS MARK", "MERHAN JADE DAREL", "DECIERE TUMBALI", "LYKA MAE SALANDRON", "ARGAWANON MARICRIS", "FLORES ALDWYN FLINT", "UMAHAG CYRUS MIGUEL", "BRAGA MART CHRISTIAN", "BROWN KYLE", "ARAQUEL BERLIN", "DAHAN CATHERINE", "AYOS KRISTINE", "RELATO JOHN CEDRICK", "ENCINA KURT SAM", "AMADOR CLARITA", "AYES KRISTINE", "VILLANUEVA ROSETINE MILES", "VILLANUEVA KATE ASHLEY", "NIERVES KENT ELMER", "TERENZ BALCE", "PAHAY LOVELY JOY", "ROSEL JOHN HENRY", "ESCASURA JOSE GABRIEL", "CORRE JANSSEN", "ABELLA RAIZEN", "ERILLA ROCELA", "VILLARTA JELLECA", "BARROS JOHN CARLO", "ORIBIANA IVAN CLARK", "FLORES LUIS GABRIEL", "ALVISO JONALYN", "RODEL JOHN MARK", "CANOY FRITZ", "ANSALI JEROME", "BERNANDO EDWARD", "BERNANDO EXEQUEL", "PASAYLO RHONNET", "MORENA ANGELINE MAE", "MAGALLON TERESITA", "CABANTUGAN MYRA", "RUBILLOS RUEL JR", "LUCHAVEZ REGINE", "ABANTE RONNEL"]};
 const LDC_SKIP=new Set(['JR','SR','II','III','IV']);
@@ -806,7 +823,7 @@ function renderEmployeeCutoffCalendar(rows,start,end){
    records.forEach(r=>{if(!r.time_in)return;const tg=attTags(r,currentEmployee?.shift_assignment);kinds.push(tg.missing?'missing':tg.late?'late':tg.under?'ut':tg.ot?'ot':'on-time')});
    const priority=['missing','late','ut','ot','on-time'];let kind=priority.find(k=>kinds.includes(k))||'';
    status.textContent=records.length?`${records.length} shift${records.length===1?'':'s'}${kind==='missing'?' · Missing Time Out':''}`:(day<=localDay()?'No record':'—');
-   btn.classList.add(kind||'empty-day');btn.append(dayNo,status);if(dtrNoteMap[day])btn.classList.add('has-note');
+   btn.classList.add(kind||'empty-day');btn.append(dayNo,status);if(records.some(r=>dtrNoteMap[String(r.id)])||dtrNoteMap[day])btn.classList.add('has-note');
    btn.setAttribute('aria-label',`${displayWorkDate(day)}; ${records.length} attendance records`);
    btn.onclick=()=>{host.querySelectorAll('.calendar-day[aria-pressed="true"]').forEach(b=>b.setAttribute('aria-pressed','false'));btn.setAttribute('aria-pressed','true');showRecord(day,records)};
    if(kind==='late'||kind==='missing')btn.classList.add('problem');grid.append(btn);
@@ -1003,7 +1020,7 @@ async function loadTimeoutNotes(quiet=false){
   const inp=$('timeoutArchiveDate'),today=localDay();if(toFollowToday||!inp.value)inp.value=today;const day=inp.value;inp.max=today;
   const q=[sb.from('attendance_dtr').select('*').eq('work_date',day).not('time_in','is',null)];
   if(day===today)q.push(sb.from('attendance_dtr').select('*').eq('work_date',addDaysIso(day,-1)).not('time_in','is',null).is('time_out',null));
-  const [res,au]=await Promise.all([Promise.all(q),Promise.resolve({data:[]})]),bad=res.find(r=>r.error);toAutoSet=new Set();(au.data||[]).forEach(a=>{let d=a.details;if(typeof d==='string'){try{d=JSON.parse(d)}catch{d=null}}if(d&&d.time_in){const t=new Date(d.time_in).getTime();if(!isNaN(t))toAutoSet.add(a.target_name+'|'+t)}});
+  const res=await Promise.all(q),bad=res.find(r=>r.error);toAutoSet=new Set();
   if(bad){toAttendanceRows=[];renderTimeoutMonitor();if(!quiet)managerMessage('Time In & Out could not be loaded: '+bad.error.message,true);return}
   const seen=new Set();toAttendanceRows=res.flatMap(r=>r.data||[]).filter(r=>{const key=r.id??(r.employee_id+'|'+r.time_in);if(seen.has(key))return false;seen.add(key);return true});
   renderTimeoutMonitor();
@@ -1026,7 +1043,7 @@ function renderTimeoutMonitor(){
     cell(shiftCellText(x));cell((inDay!==day?displayWorkDate(inDay)+' · ':'')+fmtTime(x.r.time_in));
     cell(s.out?fmtTime(s.out):'—');
     const w=s.out&&!x.r.time_out?workCalc(x.r.time_in,new Date(s.out).toISOString(),x.e.shift_assignment,x.r.break_minutes):null,hrs=x.r.time_out?Number(x.r.rendered_hours||0):(w?w.regular:null),ot=x.r.time_out?Number(x.r.overtime_hours||0):(w?w.ot:0);cell(hrs===null?'—':hrs.toFixed(2)+(ot?' + '+ot+' OT':''));
-    const st=document.createElement('td'),tag=document.createElement('span');tag.className='tg '+(s.k==='done'?'ok':s.k==='on'?'on':'mi');tag.textContent=s.k==='done'?'Timed out':s.k==='on'?'On duty':'No Time Out';st.append(tag);tr.append(st);body.append(tr)});
+    const st=document.createElement('td'),tag=document.createElement('span');tag.className='tg '+(s.k==='done'?'ok':s.k==='on'?'on':'mi');tag.textContent=s.k==='done'?'Timed out':s.k==='on'?'On duty':'Missing Time Out';st.append(tag);tr.append(st);body.append(tr)});
   $('toEmpty').hidden=shown.length>0;
 }
 document.querySelectorAll('#toFilter button').forEach(b=>b.onclick=()=>{toFilter=b.dataset.s;document.querySelectorAll('#toFilter button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));renderTimeoutMonitor()});
@@ -1105,8 +1122,8 @@ const DX=(()=>{
   return {S,col,build}
 })();
 var dtrExportNotes={};
-async function loadDtrExportNotes(){dtrExportNotes={};try{const dateMode=$('dtrMode').value==='date';let start,end;if(dateMode){start=end=$('dtrDate').value}else{[start,end]=$('dtrCutoff').value.split('|')}let from=0,all=[];for(let i=0;i<30;i++){const {data,error}=await sb.from('dtr_notes').select('employee_id,work_date,kind,note').gte('work_date',start).lte('work_date',end).order('work_date').order('employee_id').range(from,from+999);if(error||!data||!data.length)break;all=all.concat(data);from+=data.length}all.forEach(n=>{const k=String(n.employee_id)+'|'+n.work_date;(dtrExportNotes[k]=dtrExportNotes[k]||{})[n.kind]=n.note})}catch(e){}}
-function remarkText(e,r){const tg=attTags(r,e.shift_assignment),p=[];if(tg.late)p.push('Late '+fmtAttMins(tg.late));if(tg.under)p.push('Undertime '+fmtAttMins(tg.under));if(tg.ot)p.push('Overtime '+(Number.isInteger(tg.ot)?tg.ot:tg.ot.toFixed(2))+' h');if(r.time_in&&!r.time_out)p.push('No Time Out yet');if(tg.rs&&tg.rs.source==='detected')p.push('Counted as '+shortShift(tg.rs.text)+' (saved '+shortShift(tg.rs.assigned)+')');if(tg.rs&&tg.rs.source==='mismatch')p.push('Shift unclear');const nn=dtrExportNotes[String(e.id)+'|'+r.work_date]||{};if(nn.undertime)p.push('Reason: '+nn.undertime);if(nn.management)p.push('Note: '+nn.management);return p.join(' | ')}
+async function loadDtrExportNotes(){dtrExportNotes={};try{const dateMode=$('dtrMode').value==='date';let start,end;if(dateMode){start=end=$('dtrDate').value}else{[start,end]=$('dtrCutoff').value.split('|')}let from=0,all=[];for(let i=0;i<30;i++){const {data,error}=await sb.from('dtr_notes').select('employee_id,attendance_id,work_date,kind,note').gte('work_date',start).lte('work_date',end).order('work_date').order('employee_id').range(from,from+999);if(error||!data||!data.length)break;all=all.concat(data);from+=data.length}all.forEach(n=>{const k=String(n.employee_id)+'|'+(n.attendance_id?String(n.attendance_id):n.work_date);(dtrExportNotes[k]=dtrExportNotes[k]||{})[n.kind]=n.note})}catch(e){}}
+function remarkText(e,r){const tg=attTags(r,e.shift_assignment),p=[];if(tg.late)p.push('Late '+fmtAttMins(tg.late));if(tg.under)p.push('Undertime '+fmtAttMins(tg.under));if(tg.ot)p.push('Overtime '+(Number.isInteger(tg.ot)?tg.ot:tg.ot.toFixed(2))+' h');if(r.time_in&&!r.time_out)p.push('No Time Out yet');if(tg.rs&&tg.rs.source==='detected')p.push('Counted as '+shortShift(tg.rs.text)+' (saved '+shortShift(tg.rs.assigned)+')');if(tg.rs&&tg.rs.source==='mismatch')p.push('Shift unclear');const nn=dtrExportNotes[String(e.id)+'|'+(r.id?String(r.id):r.work_date)]||dtrExportNotes[String(e.id)+'|'+r.work_date]||{};if(nn.undertime)p.push('Reason: '+nn.undertime);if(nn.management)p.push('Note: '+nn.management);return p.join(' | ')}
 function dtrExcelBuild(){
   const S=DX.S,col=DX.col,NAVY='1F3864',BLUE='2F5597',LIGHT='DDEBF7',BAND='F5F8FC',GREY='595959';
   const modeDate=$('dtrMode').value==='date';let start,end;if(modeDate){start=end=$('dtrDate').value}else{[start,end]=$('dtrCutoff').value.split('|')}
@@ -1197,20 +1214,21 @@ function dtrExcelBuild(){
   const day=d=>String(Number(d.slice(-2)));
   rows3[3]={h:32,c:{0:{v:'No.',s:hd},1:{v:'LDC',s:hd},2:{v:'Employee Name',s:hd}}};
   days.forEach((d,i)=>{const w=new Date(d+'T00:00:00Z').getUTCDay(),we=w===0||w===6;rows3[3].c[3+i]={v:wk(d)+'\n'+new Date(d+'T00:00:00Z').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'UTC'}),s:we?hw:hd}});
-  ['Days','Hours','OT (h)'].forEach((t,i)=>rows3[3].c[3+days.length+i]={v:t,s:hd});
-  emps.forEach((e,i)=>{const band=i%2?BAND:'FFFFFF',b={bd:'thin',bdc:'E1E6EE'},lc=ldcFill(e.ldc),q={h:21,c:{}},byDate=new Map(e.rows.map(x=>[x.r.work_date,x]));
+  ['Shifts','Hours','OT (h)'].forEach((t,i)=>rows3[3].c[3+days.length+i]={v:t,s:hd});
+  emps.forEach((e,i)=>{const band=i%2?BAND:'FFFFFF',b={bd:'thin',bdc:'E1E6EE'},lc=ldcFill(e.ldc),q={h:21,c:{}},byDate=new Map();e.rows.forEach(x=>{const a=byDate.get(x.r.work_date)||[];a.push(x);byDate.set(x.r.work_date,a)});
     q.c[0]={v:i+1,s:S({...b,fill:band,h:'center',c:GREY})};q.c[1]={v:e.ldc?'LDC '+e.ldc:'—',s:S({...b,fill:lc.fill,c:lc.c,b:1,h:'center',sz:9})};q.c[2]={v:e.full_name,s:S({...b,fill:band,b:1,h:'left',ind:1})};
-    days.forEach((d,k)=>{const x=byDate.get(d),w=new Date(d+'T00:00:00Z').getUTCDay(),we=w===0||w===6,base=we?'F2F2F2':band;
-      if(!x||!x.r.time_in){q.c[3+k]={s:S({...b,fill:base})};return}
-      const t=x.tg,rec=x.r;let st={fill:'E2F4EA',c:'0A7A4B'};if(!rec.time_out)st={fill:'FDE2E4',c:'B42336'};else if(t.late)st={fill:'FFE9C7',c:'9A5B00'};else if(t.ot)st={fill:'D6ECFA',c:'0369A1'};else if(t.under)st={fill:'E8DDF8',c:'5B3A9E'};
-      q.c[3+k]=rec.rendered_hours==null?{v:'IN',s:S({...b,...st,b:1,h:'center',sz:9})}:{v:Number(Number(rec.rendered_hours).toFixed(2)),s:S({...b,...st,b:1,h:'center',fmt:'0.00',sz:9})}});
+    days.forEach((d,k)=>{const xs=byDate.get(d)||[],w=new Date(d+'T00:00:00Z').getUTCDay(),we=w===0||w===6,base=we?'F2F2F2':band;
+      if(!xs.length){q.c[3+k]={s:S({...b,fill:base})};return}
+      const missing=xs.some(x=>!x.r.time_out),late=xs.some(x=>x.tg.late),ot=xs.some(x=>Number(x.r.overtime_hours||0)>0),under=xs.some(x=>x.tg.under),hours=xs.reduce((a,x)=>a+(x.r.rendered_hours==null?0:Number(x.r.rendered_hours)),0),complete=xs.filter(x=>x.r.rendered_hours!=null).length;
+      let st={fill:'E2F4EA',c:'0A7A4B'};if(missing)st={fill:'FDE2E4',c:'B42336'};else if(late)st={fill:'FFE9C7',c:'9A5B00'};else if(ot)st={fill:'D6ECFA',c:'0369A1'};else if(under)st={fill:'E8DDF8',c:'5B3A9E'};
+      const value=complete?Number(hours.toFixed(2)):(missing?'IN':0);q.c[3+k]={v:value,s:S({...b,...st,b:1,h:'center',fmt:typeof value==='number'?'0.00':undefined,sz:9})}});
     const a=col(3),z=col(2+days.length),rq=hdr3=>`${a}${hdr3}:${z}${hdr3}`,rw=5+i;
     const hrs=e.rows.reduce((s,x)=>s+(x.r.rendered_hours==null?0:Number(x.r.rendered_hours)),0),cnt=e.rows.filter(x=>x.r.rendered_hours!=null).length,ot=e.rows.reduce((s,x)=>s+(x.r.overtime_hours==null?0:Number(x.r.overtime_hours)),0);
     const sT=S({...b,fill:LIGHT,b:1,c:NAVY,h:'center'});
     q.c[3+days.length]={f:`COUNT(${rq(rw)})`,v:cnt,s:S({...b,fill:LIGHT,b:1,c:NAVY,h:'center',fmt:'0'})};q.c[4+days.length]={f:`SUM(${rq(rw)})`,v:Number(hrs.toFixed(2)),s:S({...b,fill:LIGHT,b:1,c:NAVY,h:'center',fmt:'0.00'})};q.c[5+days.length]={v:Number(ot.toFixed(2)),s:S({...b,fill:LIGHT,b:1,c:'0369A1',h:'center',fmt:'0.00'})};
     rows3[4+i]=q});
   if(emps.length){const tr3={h:24,c:{}},last3=4+emps.length;for(let i=0;i<NC3;i++)tr3.c[i]={s:ts};tr3.c[2]={v:'TOTAL HOURS',s:S({fill:LIGHT,b:1,c:NAVY,h:'left',ind:1,bd:{t:'medium',b:'thin'},bdc:NAVY})};
-    days.forEach((d,k)=>{const cc=col(3+k),v=emps.reduce((s,e)=>{const x=e.rows.find(y=>y.r.work_date===d);return s+(x&&x.r.rendered_hours!=null?Number(x.r.rendered_hours):0)},0);tr3.c[3+k]={f:`SUM(${cc}5:${cc}${last3})`,v:Number(v.toFixed(2)),s:S({fill:LIGHT,b:1,c:NAVY,h:'center',sz:9,fmt:'0.0',bd:{t:'medium',b:'thin'},bdc:NAVY})}});
+    days.forEach((d,k)=>{const cc=col(3+k),v=emps.reduce((s,e)=>{const xs=e.rows.filter(y=>y.r.work_date===d);return s+xs.reduce((a,x)=>a+(x.r.rendered_hours==null?0:Number(x.r.rendered_hours)),0)},0);tr3.c[3+k]={f:`SUM(${cc}5:${cc}${last3})`,v:Number(v.toFixed(2)),s:S({fill:LIGHT,b:1,c:NAVY,h:'center',sz:9,fmt:'0.0',bd:{t:'medium',b:'thin'},bdc:NAVY})}});
     [['days',emps.reduce((s,e)=>s+e.rows.filter(x=>x.r.rendered_hours!=null).length,0),'0'],['hrs',T.hrs,'0.00'],['ot',emps.reduce((s,e)=>s+e.rows.reduce((x,y)=>x+(y.r.overtime_hours==null?0:Number(y.r.overtime_hours)),0),0),'0.00']].forEach(([k,v,fm],i)=>{const cc=col(3+days.length+i);tr3.c[3+days.length+i]={f:`SUM(${cc}5:${cc}${last3})`,v:Number(v.toFixed(2)),s:S({fill:LIGHT,b:1,c:NAVY,h:'center',fmt:fm,bd:{t:'medium',b:'thin'},bdc:NAVY})}});
     rows3[4+emps.length]=tr3}
   const sheet3={name:'Attendance Grid',cols:[6,8,32,...days.map(()=>7.5),8,9,9],rows:rows3,merges:m3,freeze:{r:4,c:3},tab:'0A7A4B',printTitles:'4',footL:'Better Edge Solutions · Attendance grid '+period};
@@ -1595,7 +1613,7 @@ const UNDERTIME_GRACE_MIN=5;let dtrNoteMap={},dtrNoteRows=[];
 function fmtMins(m){const h=Math.floor(m/60),mm=Math.round(m%60);return h+'h '+String(mm).padStart(2,'0')+'m'}
 function undertimeMins(timeIn,timeOut,shiftText){shiftText=resolveShift(timeIn,shiftText).text;if(!parseShift(shiftText)||!timeIn||!timeOut)return 0;const d=(shiftEndFor(timeIn,shiftText)-new Date(timeOut).getTime())/60000;return d>UNDERTIME_GRACE_MIN?Math.round(d):0}
 function virtualTimeOut(rec){return rec&&rec.time_out?rec.time_out:null}
-function buildNoteMap(rows){const m={};rows.forEach(r=>{(m[r.work_date]=m[r.work_date]||{})[r.kind]={note:r.note,mins:r.undertime_minutes}});return m}
+function buildNoteMap(rows){const m={};rows.forEach(r=>{const k=r.attendance_id?String(r.attendance_id):r.work_date;(m[k]=m[k]||{})[r.kind]={note:r.note,mins:r.undertime_minutes}});return m}
 function askUndertimeReason(mins,schedTs){return new Promise(res=>{
   const fil=document.documentElement.lang==='fil',md=$('utModal');
   $('utTitle').textContent=fil?'Bakit maaga kang nag-Time Out?':'Why are you timing out early?';
@@ -1610,14 +1628,14 @@ function askUndertimeReason(mins,schedTs){return new Promise(res=>{
   $('utYes').onclick=()=>{const v=$('utReason').value.trim();if(v.length<3){$('utErr').textContent=fil?'Pakilagay ang dahilan (hindi bababa sa 3 letra).':'Please write the reason (at least 3 characters).';return}done(v)};
 })}
 async function saveUndertimeNote(rec,note,mins){
-  try{let wd=null;const {data}=await sb.from('attendance_dtr').select('work_date').eq('employee_id',currentEmployee.id).eq('time_in',rec.time_in).limit(1);wd=data&&data[0]&&data[0].work_date;if(!wd)wd=manilaDay(rec.time_in);
-    const {error}=await sb.from('dtr_notes').insert({employee_id:String(currentEmployee.id),work_date:wd,kind:'undertime',note,undertime_minutes:mins});
-    if(error&&error.code!=='23505')message('attendanceMsg','Time Out saved, but your note could not be saved: '+error.message,true)}
-  catch(e){message('attendanceMsg','Time Out saved, but your note could not be saved.',true)}
+  try{const wd=rec.work_date||manilaDay(rec.time_in);
+    const {error}=await sb.from('dtr_notes').insert({employee_id:String(currentEmployee.id),attendance_id:rec.id,work_date:wd,kind:'undertime',note,undertime_minutes:mins});
+    if(error)message('attendanceMsg','Time Out saved, but your shift-specific note could not be saved: '+error.message,true)}
+  catch(e){message('attendanceMsg','Time Out saved, but your shift-specific note could not be saved.',true)}
 }
 function appendDayNotes(detail,day,record){
   const fil=document.documentElement.lang==='fil',add=(label,text)=>{const b=document.createElement('div');b.className='note-block';const s=document.createElement('small'),p=document.createElement('span');s.textContent=label;p.textContent=text;b.append(s,p);detail.append(b)};
-  const sh=currentEmployee&&currentEmployee.shift_assignment,vo=record&&virtualTimeOut(record,sh),um=vo?undertimeMins(record.time_in,vo,sh):0,n=dtrNoteMap[day]||{};
+  const sh=currentEmployee&&currentEmployee.shift_assignment,vo=record&&record.time_out,um=vo?undertimeMins(record.time_in,vo,sh):0,n=(record&&dtrNoteMap[String(record.id)])||dtrNoteMap[day]||{};
   if(um>0)add('Undertime',fmtMins(um));
   if(n.undertime)add(fil?'Dahilan mo':'Your reason',n.undertime.note);
   if(n.management)add(fil?'Tala mula sa management':'Note from management',n.management.note);
@@ -1625,9 +1643,9 @@ function appendDayNotes(detail,day,record){
 function dtrNoteRow(emp,r,view){const tr=document.createElement('tr');tr.className='dtr-note-row';const td=document.createElement('td');td.colSpan=7;tr.append(td);dtrNoteRows.push({td,r});return tr}
 async function hydrateDtrNotes(emp,start,end,view){
   const rows=dtrNoteRows.slice();let map={};
-  try{const {data,error}=await sb.from('dtr_notes').select('work_date,kind,note,undertime_minutes').eq('employee_id',String(emp.id)).gte('work_date',start).lte('work_date',end);if(!error)map=buildNoteMap(data||[])}catch(e){}
+  try{const {data,error}=await sb.from('dtr_notes').select('attendance_id,work_date,kind,note,undertime_minutes').eq('employee_id',String(emp.id)).gte('work_date',start).lte('work_date',end);if(!error)map=buildNoteMap(data||[])}catch(e){}
   rows.forEach(({td,r})=>{
-    td.replaceChildren();const n=map[r.work_date]||{},wrap=document.createElement('div');wrap.className='nr';
+    td.replaceChildren();const n=map[String(r.id)]||map[r.work_date]||{},wrap=document.createElement('div');wrap.className='nr';
     const um=r.time_out?undertimeMins(r.time_in,r.time_out,emp.shift_assignment):0,info=document.createElement('div'),lines=[];info.style.flex='1 1 240px';
     if(um>0)lines.push('Undertime: '+fmtMins(um));if(n.undertime)lines.push('Sorter’s reason: '+n.undertime.note);
     info.textContent=lines.length?lines.join(' · '):'No sorter note for this day.';wrap.append(info);
@@ -1637,9 +1655,9 @@ async function hydrateDtrNotes(emp,start,end,view){
 }
 async function saveMgrNote(emp,r,inp,btn){
   const note=inp.value.trim();btn.disabled=true;
-  try{let err=null;if(note){({error:err}=await sb.from('dtr_notes').upsert({employee_id:String(emp.id),work_date:r.work_date,kind:'management',note,updated_at:new Date().toISOString()},{onConflict:'employee_id,work_date,kind'}))}else{({error:err}=await sb.from('dtr_notes').delete().eq('employee_id',String(emp.id)).eq('work_date',r.work_date).eq('kind','management'))}
-    if(err)managerMessage('Could not save the note: '+err.message+' If this is the first time, run the DTR notes SQL in Supabase.',true);else{managerMessage(note?'Note saved. The sorter will see it on their DTR.':'Note removed.');audit(note?'Added DTR note':'Removed DTR note',emp.full_name,{date:r.work_date})}}
-  catch(e){managerMessage('Could not save the note.',true)}
+  try{let err=null;if(note){({error:err}=await sb.from('dtr_notes').upsert({employee_id:String(emp.id),attendance_id:r.id,work_date:r.work_date,kind:'management',note,updated_at:new Date().toISOString()},{onConflict:'attendance_id,kind'}))}else{({error:err}=await sb.from('dtr_notes').delete().eq('employee_id',String(emp.id)).eq('attendance_id',r.id).eq('kind','management'))}
+    if(err)managerMessage('Could not save the shift-specific note: '+err.message+' Run the V50 notes migration in Supabase first.',true);else{managerMessage(note?'Shift-specific note saved. The sorter will see it on this attendance record.':'Shift-specific note removed.');audit(note?'Added DTR note':'Removed DTR note',emp.full_name,{date:r.work_date,attendance_id:r.id})}}
+  catch(e){managerMessage('Could not save the shift-specific note.',true)}
   btn.disabled=false;
 }
 
@@ -1699,7 +1717,7 @@ async function toExportXlsx(){
   const day=$('timeoutArchiveDate').value||localDay(),rows=timeoutRows().map(x=>({...x,s:toState(x)}));
   if(!rows.length)return managerMessage('Nothing to export for this day.',true);
   rows.sort((a,b)=>String(a.e.full_name).localeCompare(String(b.e.full_name)));
-  const notes={};try{const wds=[...new Set(rows.map(x=>x.r.work_date||manilaDay(x.r.time_in)))],{data}=await sb.from('dtr_notes').select('employee_id,work_date,kind,note').in('work_date',wds);(data||[]).forEach(n=>{(notes[String(n.employee_id)+'|'+n.work_date]=notes[String(n.employee_id)+'|'+n.work_date]||{})[n.kind]=n.note})}catch(e){}
+  const notes={};try{const wds=[...new Set(rows.map(x=>x.r.work_date||manilaDay(x.r.time_in)))],{data}=await sb.from('dtr_notes').select('employee_id,attendance_id,work_date,kind,note').in('work_date',wds);(data||[]).forEach(n=>{const k=String(n.employee_id)+'|'+(n.attendance_id?String(n.attendance_id):n.work_date);(notes[k]=notes[k]||{})[n.kind]=n.note})}catch(e){}
   const gen=new Date().toLocaleString('en-PH',{timeZone:'Asia/Manila',dateStyle:'medium',timeStyle:'short'});
   const bytes=buildXlsx(toExportRows(day,rows,gen,notes),[34,10,20,12,12,10,38,50],'Time In & Out'),a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));a.download='BESI_Time_In_Out_'+day+'.xlsx';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);
