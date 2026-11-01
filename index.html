@@ -753,8 +753,11 @@ async function refreshPunchControls(){
  const inBtn=$('timeIn'),outBtn=$('timeOut'),shiftSelect=$('employeeShift'),saveShiftBtn=$('saveShift');
  inBtn.disabled=true;outBtn.disabled=true;shiftSelect.disabled=true;saveShiftBtn.disabled=true;
  if(!currentEmployee){shiftSelect.disabled=false;saveShiftBtn.disabled=false;openRecord=null;return {hasOpen:false,error:null}}
- const {data,error}=await sb.from('attendance_records').select('id,time_in')
-   .eq('employee_id',currentEmployee.id).is('time_out',null)
+ // Only a record inside its scheduled-end + 4-hour window is an active shift.
+ // Expired records keep time_out=NULL and remain visible as Missing Time Out.
+ const nowIso=new Date().toISOString();
+ const {data,error}=await sb.from('attendance_records').select('id,time_in,active_until')
+   .eq('employee_id',currentEmployee.id).is('time_out',null).gt('active_until',nowIso)
    .order('time_in',{ascending:false}).order('id',{ascending:false}).limit(1).maybeSingle();
  if(error){shiftSelect.disabled=false;saveShiftBtn.disabled=false;return {hasOpen:false,error}}
  openRecord=data||null;
@@ -763,7 +766,7 @@ async function refreshPunchControls(){
  const scheduledDate=shiftIsSaved?scheduledShiftDate(new Date(),savedShift):null;
  let alreadyClocked=false;
  if(scheduledDate){const q=await sb.from('attendance_records').select('id').eq('employee_id',currentEmployee.id).eq('scheduled_shift_date',scheduledDate).limit(1).maybeSingle();if(q.error){shiftSelect.disabled=false;saveShiftBtn.disabled=false;return {hasOpen,error:q.error}}alreadyClocked=!!q.data}
- // One Time In per scheduled shift date. An older open record does not block a different shift date.
+ // After active_until, an old missing Time Out no longer blocks the next shift.
  shiftSelect.disabled=hasOpen;saveShiftBtn.disabled=hasOpen;
  inBtn.disabled=!shiftIsSaved||alreadyClocked;
  if(alreadyClocked)message('attendanceMsg','Time In is already recorded for your scheduled shift date ('+scheduledDate+').');
@@ -926,7 +929,7 @@ function fmtTime(ts){return new Date(ts).toLocaleTimeString('en-PH',{timeZone:'A
 function computeFlags(day){let flags={present:[],late:[],absent:[],early:[],missed:[]},now=Date.now(),noShift=0,byEmp=new Map();chartData.forEach(r=>{if(!byEmp.has(r.employee_id))byEmp.set(r.employee_id,[]);byEmp.get(r.employee_id).push(r)});
 managerData.filter(e=>e.status==='Active').forEach(e=>{let sh=parseShift(e.shift_assignment);if(!sh)noShift++;let recs=byEmp.get(e.id)||[];
 recs.filter(r=>r.work_date===day&&r.time_in).forEach(r=>{const sh=parseShift(resolveShift(r.time_in,e.shift_assignment).text);if(!sh)return;let d=signedDiff(manilaMin(r.time_in),sh.start);if(d>FLAG_GRACE)flags.late.push({e,text:`${d} min late · In ${fmtTime(r.time_in)}`});if(r.time_out){let o=signedDiff(manilaMin(r.time_out),sh.end);if(o<-FLAG_GRACE)flags.early.push({e,text:`${-o} min early · Out ${fmtTime(r.time_out)}`})}});
-recs.filter(r=>r.time_in&&!r.time_out).forEach(r=>{let overdue=sh?now>shiftEndFor(r.time_in,e.shift_assignment)+60*60000:now-new Date(r.time_in).getTime()>840*60000;if(overdue)flags.missed.push({e,text:`${displayWorkDate(r.work_date)} · In ${fmtTime(r.time_in)} · no Time Out`})});
+recs.filter(r=>r.time_in&&!r.time_out).forEach(r=>{let overdue=sh?now>shiftEndFor(r.time_in,e.shift_assignment)+STALE_OPEN_MS:now-new Date(r.time_in).getTime()>840*60000;if(overdue)flags.missed.push({e,text:`${displayWorkDate(r.work_date)} · In ${fmtTime(r.time_in)} · no Time Out`})});
 if(sh){let st=shiftStartTs(day,sh.start),has=recs.some(r=>r.time_in&&(r.work_date===day||Math.abs(new Date(r.time_in).getTime()-st)<=8*3600000));if(!has&&now>st+FLAG_ABSENT_AFTER*60000)flags.absent.push({e,text:`Shift ${e.shift_assignment} · no Time In`})}});
 managerData.forEach(e=>{let rs=(byEmp.get(e.id)||[]).filter(r=>r.work_date===day&&r.time_in).sort((a,b)=>String(a.time_in).localeCompare(String(b.time_in)));if(rs.length)flags.present.push({e,first:rs[0],last:rs[rs.length-1]})});
 return {flags,noShift}}
@@ -1007,11 +1010,11 @@ $('auditArchiveBtn').onclick=async()=>{const d=$('auditArchiveDate').value;if(!d
 $('auditDownloadBtn').onclick=()=>{if(!auditShown.length)return managerMessage('Nothing to download.',true);csvDownload('BESI_Audit_log_'+auditView+'_'+localDay()+'.csv',['When','Who (login)','Action','Employee','Details'],auditShown.map(a=>[auditWhen(a.created_at),a.actor_email||'System',a.action,a.target_name||'',auditDetails(a.details)]))};
 
 /* ===== Missed Time Out handling ===== */
-const STALE_OPEN_MS=4*3600000;let openRecord=null,toNotes=[],toAttendanceRows=[],toFilter='all',toActive=null;
+const STALE_OPEN_MS=4*3600000; // Release active status 4 hours after scheduled shift end; never create a Time Out.\nlet openRecord=null,toNotes=[],toAttendanceRows=[],toFilter='all',toActive=null;
 function shiftEndFor(timeIn,shiftText){shiftText=resolveShift(timeIn,shiftText).text;let sh=parseShift(shiftText),t=new Date(timeIn).getTime();if(!sh)return t+9*3600000;let day=new Date(t+8*3600000).toISOString().slice(0,10),best=null;[-1,0,1].forEach(o=>{let st=shiftStartTs(addDaysIso(day,o),sh.start);if(best===null||Math.abs(st-t)<Math.abs(best-t))best=st});return best+sh.dur*60000}
 function paintStatus(){const st=$('empStatus'),tx=$('empStatusText');if(!st)return;const live=!!openRecord;st.classList.toggle('on',live);tx.textContent=live?'Active shift · since '+fmtTime(openRecord.time_in):'Not clocked in';renderToday();if(!live)loadLastDone()}
 function tickClock(){const c=$('liveClock');if(!c||$('employeePanel').classList.contains('hidden'))return;const d=new Date();c.textContent=d.toLocaleTimeString('en-PH',{timeZone:'Asia/Manila',hour:'numeric',minute:'2-digit',second:'2-digit'});$('liveDate').textContent=d.toLocaleDateString('en-PH',{timeZone:'Asia/Manila',weekday:'long',month:'long',day:'numeric',year:'numeric'})}
-function sysTimedOut(rec){return !!rec&&!rec.time_out&&Date.now()>shiftEndFor(rec.time_in,currentEmployee&&currentEmployee.shift_assignment)}
+function sysTimedOut(rec){return !!rec&&!rec.time_out&&Date.now()>shiftEndFor(rec.time_in,currentEmployee&&currentEmployee.shift_assignment)+STALE_OPEN_MS}
 setInterval(tickClock,1000);tickClock();
 const manilaDay=ts=>new Date(new Date(ts).getTime()+8*3600000).toISOString().slice(0,10);
 let toFollowToday=true,toAutoSet=new Set();
@@ -1029,13 +1032,14 @@ function timeoutRows(){const emp=id=>managerData.find(e=>e.id===id),rows=[];toAt
 function toState(x){const sched=shiftEndFor(x.r.time_in,x.e&&x.e.shift_assignment),now=Date.now();
   if(x.r.time_out){const out=new Date(x.r.time_out).getTime();return {k:'done',sched,out}}
   
-  if(now>sched)return {k:'missing',sched,out:null};
+  if(now>sched+STALE_OPEN_MS)return {k:'missing',sched,out:null};
+  if(now>sched)return {k:'grace',sched,out:null};
   return {k:'on',sched,out:null}}
 function toLeft(ms){const m=Math.max(1,Math.ceil(ms/60000));return Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m'}
 function renderTimeoutMonitor(){
   const day=$('timeoutArchiveDate').value||localDay(),q=($('toSearch').value||'').trim().toLowerCase(),all=timeoutRows().map(x=>({...x,s:toState(x)})),isDone=x=>x.s.k==='done';
   const late=all.filter(x=>x.s.k==='missing').length,badge=$('toBadge');badge.textContent=late;badge.classList.toggle('hidden',!late);
-  const sum=$('toSummary');sum.replaceChildren();[['Timed in',all.length],['Timed out',all.filter(isDone).length],['On duty',all.filter(x=>!isDone(x)).length]].forEach(([l,v])=>{const d=document.createElement('div'),sm=document.createElement('small'),b=document.createElement('b');sm.textContent=l;b.textContent=v;d.append(sm,b);sum.append(d)});
+  const sum=$('toSummary');sum.replaceChildren();[['Timed in',all.length],['Timed out',all.filter(isDone).length],['On duty',all.filter(x=>x.s.k==='on').length],['Grace period',all.filter(x=>x.s.k==='grace').length],['Missing Time Out',all.filter(x=>x.s.k==='missing').length]].forEach(([l,v])=>{const d=document.createElement('div'),sm=document.createElement('small'),b=document.createElement('b');sm.textContent=l;b.textContent=v;d.append(sm,b);sum.append(d)});
   const body=$('toRows');body.replaceChildren();
   const shown=all.filter(x=>(toFilter==='all'||(toFilter==='resolved')===isDone(x))&&(!q||String(x.e.full_name||'').toLowerCase().includes(q)));
   shown.forEach(x=>{const tr=document.createElement('tr'),cell=t=>{const td=document.createElement('td');td.textContent=t;tr.append(td);return td},s=x.s,inDay=manilaDay(x.r.time_in);
@@ -1043,7 +1047,7 @@ function renderTimeoutMonitor(){
     cell(shiftCellText(x));cell((inDay!==day?displayWorkDate(inDay)+' · ':'')+fmtTime(x.r.time_in));
     cell(s.out?fmtTime(s.out):'—');
     const w=s.out&&!x.r.time_out?workCalc(x.r.time_in,new Date(s.out).toISOString(),x.e.shift_assignment,x.r.break_minutes):null,hrs=x.r.time_out?Number(x.r.rendered_hours||0):(w?w.regular:null),ot=x.r.time_out?Number(x.r.overtime_hours||0):(w?w.ot:0);cell(hrs===null?'—':hrs.toFixed(2)+(ot?' + '+ot+' OT':''));
-    const st=document.createElement('td'),tag=document.createElement('span');tag.className='tg '+(s.k==='done'?'ok':s.k==='on'?'on':'mi');tag.textContent=s.k==='done'?'Timed out':s.k==='on'?'On duty':'Missing Time Out';st.append(tag);tr.append(st);body.append(tr)});
+    const st=document.createElement('td'),tag=document.createElement('span');tag.className='tg '+(s.k==='done'?'ok':(s.k==='on'||s.k==='grace')?'on':'mi');tag.textContent=s.k==='done'?'Timed out':s.k==='on'?'On duty':s.k==='grace'?'Grace period':'Missing Time Out';st.append(tag);tr.append(st);body.append(tr)});
   $('toEmpty').hidden=shown.length>0;
 }
 document.querySelectorAll('#toFilter button').forEach(b=>b.onclick=()=>{toFilter=b.dataset.s;document.querySelectorAll('#toFilter button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));renderTimeoutMonitor()});
@@ -1337,8 +1341,8 @@ function renderAttention(){
   if(attHc){const lack=attHc.rows.filter(r=>r.state==='lack');if(lack.length)items.push({tone:'red',n:lack.reduce((a,r)=>a+r.lack,0),t:'Shifts below required headcount',d:lack.map(r=>'LDC '+r.ldc+' · '+r.shift+' (short '+r.lack+')').join('  ·  '),href:'#/headcount',cta:'Open Headcount'});
     if(attHc.rows.every(r=>r.state==='unset'))items.push({tone:'amb',n:'!',t:'Required headcount not set for today',d:'Enter this week\u2019s requirement so shortages can be tracked.',href:'#/headcount',cta:'Set headcount'})}
   const now=Date.now(),emp=new Map(managerData.map(e=>[e.id,e]));let missed=0;
-  chartData.forEach(r=>{if(!r.time_in||r.time_out)return;const e=emp.get(r.employee_id);if(!e||e.status!=='Active')return;const end=shiftEndFor(r.time_in,e.shift_assignment);if(now>end)missed++});
-  if(missed)items.push({tone:'amb',n:missed,t:'No Time Out after shift end',d:'Still clocked in after their shift ended. Add a note or correct the Time Out.',href:'#/timeout',cta:'Open Time In & Out'});
+  chartData.forEach(r=>{if(!r.time_in||r.time_out)return;const e=emp.get(r.employee_id);if(!e||e.status!=='Active')return;const end=shiftEndFor(r.time_in,e.shift_assignment);if(now>end+STALE_OPEN_MS)missed++});
+  if(missed)items.push({tone:'amb',n:missed,t:'Missing Time Out after 4-hour grace period',d:'The shift remains without an actual Time Out. Review the attendance record; no automatic Time Out is created.',href:'#/timeout',cta:'Open Time In & Out'});
   if(regPendingCount)items.push({tone:'blue',n:regPendingCount,t:'Pending registrations',d:'Sorters who registered and are waiting for approval.',href:'#/employees',cta:'Review'});
   if(tix)items.push({tone:'blue',n:tix,t:'Open tickets',d:'Sorter reports waiting for a reply.',href:'#/tickets',cta:'Open Tickets'});
   for(let q=items.length-1;q>=0;q--)if(attnResolved(items[q]))items.splice(q,1);host.replaceChildren();$('attnCount').textContent=items.length?items.length+(items.length>1?' items':' item'):'All clear';$('attnCount').classList.toggle('clear',!items.length);
@@ -1355,8 +1359,8 @@ function renderToday(){
   if(openRecord){
     const inTs=new Date(openRecord.time_in).getTime(),end=shiftEndFor(openRecord.time_in,shiftText),auto=end+STALE_OPEN_MS,es=sh?Math.max(inTs,end-sh.dur*60000):inTs;inV=fmtTime(inTs);endV=fmtTime(end);
     if(now<=end){tag=T('On duty','Naka-duty');tone='ok';main=T('On duty since '+inV,'Naka-duty mula '+inV);sub=shiftText?T('Shift ','Shift ')+(resolveShift(openRecord.time_in,shiftText).text||shiftText):'';leftL=now<es?T('Starts in','Magsisimula sa'):leftL;leftV=fmtDur(now<es?es-now:end-now);pct=Math.min(100,Math.max(0,(now-es)/(end-es)*100))}
-    else if(now<=auto){tag=T('Shift ended','Tapos na ang shift');tone='warn';main=T('Your shift has ended','Tapos na ang shift mo');sub=T('You are still clocked in. Tap Time Out when you finish.','Naka-clock in ka pa. Pindutin ang Time Out kapag tapos ka na.');endL=T('Time out','Oras ng labas');endV='—';leftL=T('Shift ended','Natapos ang shift');leftV=fmtTime(end);pct=100}
-    else{tag=T('No Time Out','Walang Time Out');tone='warn';main=T('No Time Out was recorded for your last shift','Walang Time Out sa huli mong shift');sub=T('You can Time In for your next shift. Management will review the missing Time Out.','Maaari kang mag-Time In para sa susunod mong shift. Rerepasuhin ng management ang kulang na Time Out.');endL=T('Time out','Oras ng labas');endV='—';leftL=T('Shift ended','Natapos ang shift');leftV=fmtTime(end);pct=100}
+    else if(now<=auto){tag=T('Shift ended','Tapos na ang shift');tone='warn';main=T('Your shift has ended','Tapos na ang shift mo');sub=T('You are within the 4-hour grace period. Tap Time Out if you have not left yet.','Naka-clock in ka pa. Pindutin ang Time Out kapag tapos ka na.');endL=T('Time out','Oras ng labas');endV='—';leftL=T('Shift ended','Natapos ang shift');leftV=fmtTime(end);pct=100}
+    else{tag=T('No Time Out','Walang Time Out');tone='warn';main=T('No Time Out was recorded for your last shift','Walang Time Out sa huli mong shift');sub=T('The 4-hour grace period has ended. You can Time In for your next shift; management will review the missing Time Out.','Maaari kang mag-Time In para sa susunod mong shift. Rerepasuhin ng management ang kulang na Time Out.');endL=T('Time out','Oras ng labas');endV='—';leftL=T('Shift ended','Natapos ang shift');leftV=fmtTime(end);pct=100}
   }else if(lastDone&&lastDone.time_out&&now-new Date(lastDone.time_out).getTime()<12*3600000){
     const a=new Date(lastDone.time_in).getTime(),b=new Date(lastDone.time_out).getTime();tag=T('Done','Tapos na');tone='ok';main=T('Your shift has ended','Tapos na ang shift mo');sub='';inV=fmtTime(a);endL=T('Time out','Oras ng labas');endV=fmtTime(b);leftL=T('Worked','Nagtrabaho');leftV=Math.max(0,(b-Math.max(a,schedStartTs(lastDone.time_in,shiftText)))/3600000).toFixed(2)+' h';pct=100;
   }else if(!sh){tag=T('No shift','Walang shift');tone='mute';main=T('Choose your shift','Piliin ang iyong shift');sub=T('Pick and save your shift below, then you can Time In.','Piliin at i-save ang iyong shift sa ibaba para makapag-Time In.')}
@@ -1370,6 +1374,7 @@ function renderToday(){
   $('todayBarWrap').hidden=pct===null;if(pct!==null)$('todayBar').style.width=pct+'%';
 }
 setInterval(renderToday,30000);
+setInterval(()=>{if(!document.hidden&&currentEmployee&&!$('employeePanel').classList.contains('hidden'))refreshPunchControls().then(paintStatus)},60000);
 /* ===== Sorter: cutoff totals on My DTR ===== */
 function renderDtrTotals(rows){
   const host=$('dtrTotals');if(!host)return;const days=new Set(),sh=parseShift(currentEmployee&&currentEmployee.shift_assignment);let hrs=0,ot=0,late=0;
