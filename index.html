@@ -753,20 +753,24 @@ async function refreshPunchControls(){
  const inBtn=$('timeIn'),outBtn=$('timeOut'),shiftSelect=$('employeeShift'),saveShiftBtn=$('saveShift');
  inBtn.disabled=true;outBtn.disabled=true;shiftSelect.disabled=true;saveShiftBtn.disabled=true;
  if(!currentEmployee){shiftSelect.disabled=false;saveShiftBtn.disabled=false;openRecord=null;return {hasOpen:false,error:null}}
- // Only a record inside its scheduled-end + 4-hour window is an active shift.
- // Expired records keep time_out=NULL and remain visible as Missing Time Out.
- const nowIso=new Date().toISOString();
+ // Include legacy open rows created before V52 (active_until is NULL).
+ // Their grace expiry is calculated from the saved shift and original Time In.
  const {data,error}=await sb.from('attendance_records').select('id,time_in,active_until')
-   .eq('employee_id',currentEmployee.id).is('time_out',null).gt('active_until',nowIso)
-   .order('time_in',{ascending:false}).order('id',{ascending:false}).limit(1).maybeSingle();
+   .eq('employee_id',currentEmployee.id).is('time_out',null)
+   .order('time_in',{ascending:false}).order('id',{ascending:false}).limit(100);
  if(error){shiftSelect.disabled=false;saveShiftBtn.disabled=false;return {hasOpen:false,error}}
- openRecord=data||null;
- const hasOpen=!!data,savedShift=currentEmployee.shift_assignment||'',selectedShift=shiftSelect.value||'';
+ const now=Date.now(),savedShift=currentEmployee.shift_assignment||'';
+ const activeRows=(data||[]).filter(r=>{
+   const expiry=r.active_until?new Date(r.active_until).getTime():shiftEndFor(r.time_in,savedShift)+STALE_OPEN_MS;
+   return Number.isFinite(expiry)&&now<=expiry;
+ });
+ openRecord=activeRows[0]||null;
+ const hasOpen=!!openRecord,selectedShift=shiftSelect.value||'';
  const shiftIsSaved=!!savedShift&&selectedShift===savedShift;
  const scheduledDate=shiftIsSaved?scheduledShiftDate(new Date(),savedShift):null;
  let alreadyClocked=false;
  if(scheduledDate){const q=await sb.from('attendance_records').select('id').eq('employee_id',currentEmployee.id).eq('scheduled_shift_date',scheduledDate).limit(1).maybeSingle();if(q.error){shiftSelect.disabled=false;saveShiftBtn.disabled=false;return {hasOpen,error:q.error}}alreadyClocked=!!q.data}
- // After active_until, an old missing Time Out no longer blocks the next shift.
+ // Expired or legacy missing-Time-Out records do not block a new shift.
  shiftSelect.disabled=hasOpen;saveShiftBtn.disabled=hasOpen;
  inBtn.disabled=!shiftIsSaved||alreadyClocked;
  if(alreadyClocked)message('attendanceMsg','Time In is already recorded for your scheduled shift date ('+scheduledDate+').');
