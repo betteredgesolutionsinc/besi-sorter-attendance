@@ -1,5 +1,5 @@
 // BESI service worker: network first so portal updates load promptly.
-const CACHE = 'besi-v55';
+const CACHE = 'besi-v56';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
@@ -10,7 +10,7 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.origin !== location.origin) return;
+  if (url.origin !== location.origin) return; // Never intercept Supabase or CDN calls.
   e.respondWith(
     fetch(req).then(res => {
       if (res.ok) {
