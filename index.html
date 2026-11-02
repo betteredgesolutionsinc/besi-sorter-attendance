@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#10263f"><meta name="besi-ui-version" content="daily-shifts-v54-timeclock-lock-2026-11-03"><title>BESI Sorter Attendance</title>
+<meta name="theme-color" content="#10263f"><meta name="besi-ui-version" content="daily-shifts-autoclose-v56-2026-11-04"><title>BESI Sorter Attendance</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="apple-touch-icon.png"><link rel="icon" type="image/png" href="icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="BESI Attendance"><meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
@@ -763,11 +763,13 @@ async function punch(action){
      if(!isNetErr(error))pendingPunch=null;
      message('attendanceMsg',isNetErr(error)?NET_MSG:error.message,true);return;
    }
-   pendingPunch=null;if(undertimeNote&&punchRec)await saveUndertimeNote(punchRec,undertimeNote,undertimeMin);
+   pendingPunch=null;if(undertimeNote&&punchRec&&!data?.auto_closed)await saveUndertimeNote(punchRec,undertimeNote,undertimeMin);
    await loadMine();
-   message('attendanceMsg',action==='IN'
-     ?`Time In saved for ${actualShift}. Time In is now locked and Time Out is available. Location accuracy ±${Math.round(pos.coords.accuracy)} m.`
-     :`Time Out saved for ${actualShift}. This attendance record is complete. Location accuracy ±${Math.round(pos.coords.accuracy)} m.`
+   message('attendanceMsg',data?.auto_closed
+     ?`Your four-hour Time Out grace period for ${actualShift} ended. The system automatically closed that record. You may Time In for your next eligible shift.`
+     :action==='IN'
+       ?`Time In saved for ${actualShift}. Time In is now locked and Time Out is available. Location accuracy ±${Math.round(pos.coords.accuracy)} m.`
+       :`Time Out saved for ${actualShift}. This attendance record is complete. Location accuracy ±${Math.round(pos.coords.accuracy)} m.`
    )
  },async err=>{await restore();message('attendanceMsg',locationErrorText(err),true)},m=>message('attendanceMsg',m))
 }
@@ -1018,7 +1020,7 @@ $('navAnnouncements').onclick=e=>{e.preventDefault();showManagerSection('announc
 $('navArchive').onclick=e=>{e.preventDefault();showManagerSection('archiveSection','navArchive');resetArchivePlan();fillArchiveCutoffs();loadArchiveLog()};
 
 /* ===== Install as app (PWA) ===== */
-(function(){let deferred=null;const btn=$('installBtn'),hint=$('installHint'),standalone=(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone,ios=/iphone|ipad|ipod/i.test(navigator.userAgent);if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0)navigator.serviceWorker.register('sw.js?v=55').catch(()=>{});if(standalone)return;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferred=e;btn.classList.remove('hidden')});window.addEventListener('appinstalled',()=>{btn.classList.add('hidden');deferred=null});if(ios)btn.classList.remove('hidden');btn.onclick=async()=>{if(deferred){deferred.prompt();try{await deferred.userChoice}catch(e){}deferred=null;btn.classList.add('hidden')}else if(ios){hint.classList.toggle('hidden')}}})();
+(function(){let deferred=null;const btn=$('installBtn'),hint=$('installHint'),standalone=(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone,ios=/iphone|ipad|ipod/i.test(navigator.userAgent);if('serviceWorker' in navigator&&location.protocol.indexOf('http')===0)navigator.serviceWorker.register('sw.js?v=56').catch(()=>{});if(standalone)return;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferred=e;btn.classList.remove('hidden')});window.addEventListener('appinstalled',()=>{btn.classList.add('hidden');deferred=null});if(ios)btn.classList.remove('hidden');btn.onclick=async()=>{if(deferred){deferred.prompt();try{await deferred.userChoice}catch(e){}deferred=null;btn.classList.add('hidden')}else if(ios){hint.classList.toggle('hidden')}}})();
 
 /* ===== Ticket status quick change ===== */
 const statusKey=st=>st==='Resolved'?'done':st==='In progress'?'prog':'open';
