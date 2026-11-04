@@ -1,5 +1,5 @@
 // BESI service worker: network first so portal updates load promptly.
-const CACHE = 'besi-v56';
+const CACHE = 'besi-v57';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
